@@ -23,6 +23,14 @@ Poopal软件系统采用分层架构设计，包含设备端、云端和移动�
 
 #### 2. 硬件抽象层 (HAL)
 ```c
+// 摄像头抽象接口
+typedef struct {
+    bool (*init)(camera_config_t* config);
+    int (*capture_frame)(camera_frame_t* frame);
+    bool (*set_quality)(int quality);
+    void (*enable_night_vision)(bool enable);
+} camera_interface_t;
+
 // 传感器抽象接口
 typedef struct {
     bool (*init)(void);
@@ -39,330 +47,698 @@ typedef struct {
 } actuator_interface_t;
 ```
 
-#### 3. 传感器管理模块
-- **数据采集**：多传感器数据实时采集
-- **数据融合**：卡尔曼滤波算法，提高检测精度
-- **异常检测**：传感器故障自诊断
-- **校准管理**：自动校准和手动校准接口
+#### 3. 计算机视觉引擎
 
-#### 4. AI推理引擎
-- **模型格式**：TensorFlow Lite for Microcontrollers
-- **推理优化**：量化模型，降低计算复杂度
-- **在线学习**：增量学习算法，适应个体差异
-- **边缘计算**：本地实时决策，减少延迟
-
+##### AI视觉处理核心
 ```c
-// AI推理接口
+// 视觉AI引擎接口
 typedef struct {
-    bool (*load_model)(const char* model_path);
-    float (*predict)(sensor_data_t* input);
-    bool (*update_model)(training_data_t* data);
-} ai_engine_t;
+    bool (*init)(void);
+    detection_result_t (*detect_objects)(camera_frame_t* frame);
+    behavior_result_t (*analyze_behavior)(detection_sequence_t* sequence);
+    bool (*update_model)(const uint8_t* model_data, size_t size);
+    void (*configure_roi)(region_of_interest_t* roi);
+} vision_ai_engine_t;
+
+// 检测结果结构
+typedef struct {
+    uint32_t timestamp;
+    uint8_t object_count;
+    detection_box_t objects[MAX_DETECTIONS];
+    float confidence[MAX_DETECTIONS];
+    object_type_t types[MAX_DETECTIONS];
+} detection_result_t;
+
+// 行为分析结果
+typedef struct {
+    behavior_type_t behavior;    // 行为类型
+    float confidence;           // 置信度
+    position_t location;        // 位置坐标
+    uint32_t duration;         // 持续时间
+    bool is_in_target_area;    // 是否在目标区域
+} behavior_result_t;
+```
+
+##### 目标检测算法
+- **YOLOv8轻量化模型**：专门优化的宠物检测模型
+- **实时推理**：检测延迟<50ms，30fps视频流处理
+- **多类别识别**：狗、猫、人等多种目标识别
+- **边界框回归**：精确定位目标位置和大小
+
+##### 行为识别算法
+```python
+# 行为识别神经网络结构
+class BehaviorRecognitionModel:
+    def __init__(self):
+        self.temporal_cnn = TemporalCNN(input_frames=16)
+        self.lstm_layer = LSTM(hidden_size=128)
+        self.classifier = Linear(128, num_behaviors)
+    
+    def forward(self, frame_sequence):
+        # 时序特征提取
+        features = self.temporal_cnn(frame_sequence)
+        # LSTM建模时序关系
+        lstm_out, _ = self.lstm_layer(features)
+        # 行为分类
+        behavior_pred = self.classifier(lstm_out[-1])
+        return behavior_pred
+```
+
+##### 智能过滤系统
+```c
+// 智能过滤器配置
+typedef struct {
+    bool enable_human_filter;      // 启用人体过滤
+    bool enable_size_filter;       // 启用尺寸过滤
+    float min_confidence;          // 最小置信度阈值
+    uint32_t min_duration_ms;      // 最小持续时间
+    region_of_interest_t roi;      // 感兴趣区域
+} smart_filter_config_t;
+
+// 人体检测过滤
+bool filter_human_presence(detection_result_t* result) {
+    for (int i = 0; i < result->object_count; i++) {
+        if (result->types[i] == OBJECT_TYPE_HUMAN && 
+            result->confidence[i] > HUMAN_DETECTION_THRESHOLD) {
+            // 检测到人类，暂停宠物行为监测
+            return true;
+        }
+    }
+    return false;
+}
+
+// 区域过滤器
+bool is_in_target_region(detection_box_t* box, region_of_interest_t* roi) {
+    float center_x = (box->x1 + box->x2) / 2.0f;
+    float center_y = (box->y1 + box->y2) / 2.0f;
+    
+    return (center_x >= roi->x_min && center_x <= roi->x_max &&
+            center_y >= roi->y_min && center_y <= roi->y_max);
+}
+```
+
+#### 4. 传感器融合模块
+```c
+// 多传感器数据融合
+typedef struct {
+    camera_frame_t vision_data;
+    weight_data_t weight_data;
+    pir_data_t motion_data;
+    uint32_t timestamp;
+} sensor_fusion_data_t;
+
+// 卡尔曼滤波器用于位置融合
+typedef struct {
+    float state[4];        // [x, y, vx, vy]
+    float covariance[4][4]; // 协方差矩阵
+    float process_noise;    // 过程噪声
+    float measurement_noise; // 测量噪声
+} kalman_filter_t;
+
+// 传感器融合算法
+fusion_result_t sensor_fusion_process(sensor_fusion_data_t* data) {
+    fusion_result_t result = {0};
+    
+    // 视觉检测结果
+    detection_result_t vision_result = vision_detect(data->vision_data);
+    
+    // PIR运动检测结果
+    bool motion_detected = pir_check_motion(data->motion_data);
+    
+    // 重量变化检测
+    float weight_change = weight_analyze(data->weight_data);
+    
+    // 多传感器融合决策
+    if (vision_result.object_count > 0 && motion_detected && weight_change > WEIGHT_THRESHOLD) {
+        result.confidence = calculate_fusion_confidence(&vision_result, motion_detected, weight_change);
+        result.behavior = analyze_behavior_fusion(&vision_result, weight_change);
+        result.position = kalman_filter_update(&vision_result.objects[0]);
+    }
+    
+    return result;
+}
 ```
 
 #### 5. 通信协议栈
 - **WiFi管理**：连接管理、断线重连、网络配置
 - **MQTT客户端**：消息发布订阅、QoS保证
 - **蓝牙通信**：设备配对、近场通信
-- **OTA更新**：固件远程更新，版本管理
+- **OTA更新**：固件和AI模型远程更新
+
+### AI模型优化与部署
+
+#### 1. 模型压缩技术
+```c
+// 量化配置
+typedef struct {
+    quantization_type_t type;  // INT8/INT16量化
+    float scale_factor;        // 量化比例因子
+    int zero_point;           // 零点偏移
+} quantization_config_t;
+
+// 模型剪枝配置
+typedef struct {
+    float sparsity_ratio;     // 稀疏度比例
+    pruning_method_t method;  // 剪枝方法
+    float sensitivity;        // 敏感度阈值
+} pruning_config_t;
+```
+
+#### 2. 边缘计算优化
+- **模型量化**：FP32→INT8量化，模型大小减少75%
+- **网络剪枝**：去除冗余连接，推理速度提升60%
+- **算子融合**：合并相邻算子，减少内存访问
+- **内存优化**：动态内存分配，支持更大模型
+
+#### 3. 实时性能优化
+```c
+// 性能监控结构
+typedef struct {
+    uint32_t frame_process_time_ms;
+    uint32_t ai_inference_time_ms;
+    uint32_t total_latency_ms;
+    float cpu_usage_percent;
+    size_t memory_usage_bytes;
+} performance_metrics_t;
+
+// 性能优化策略
+void optimize_performance(performance_metrics_t* metrics) {
+    if (metrics->ai_inference_time_ms > TARGET_INFERENCE_TIME) {
+        // 降低模型精度或跳帧处理
+        adjust_model_precision();
+    }
+    
+    if (metrics->cpu_usage_percent > 80.0f) {
+        // 动态调整帧率
+        reduce_frame_rate();
+    }
+    
+    if (metrics->memory_usage_bytes > MEMORY_THRESHOLD) {
+        // 释放缓存，强制垃圾回收
+        cleanup_memory_cache();
+    }
+}
+```
 
 ### 软件流程图
 
 ```mermaid
 graph TD
     A[系统启动] --> B[硬件初始化]
-    B --> C[传感器校准]
-    C --> D[网络连接]
-    D --> E[主循环开始]
+    B --> C[摄像头校准]
+    C --> D[AI模型加载]
+    D --> E[网络连接]
+    E --> F[主循环开始]
     
-    E --> F[传感器数据采集]
-    F --> G[数据预处理]
-    G --> H[AI行为识别]
-    H --> I{检测到正确行为?}
+    F --> G[PIR运动检测]
+    G --> H{检测到运动?}
+    H -->|否| F
+    H -->|是| I[激活摄像头]
     
-    I -->|是| J[触发奖励机制]
-    I -->|否| K[继续监测]
+    I --> J[图像采集]
+    J --> K[AI目标检测]
+    K --> L{检测到人类?}
     
-    J --> L[记录行为数据]
-    K --> L
-    L --> M[数据上传云端]
-    M --> E
+    L -->|是| M[暂停监测]
+    L -->|否| N[宠物行为识别]
     
-    E --> N{收到控制命令?}
-    N -->|是| O[执行控制命令]
-    N -->|否| E
-    O --> E
+    N --> O[传感器数据融合]
+    O --> P{检测到排便行为?}
+    
+    P -->|否| Q[继续监测]
+    P -->|是| R{位置正确?}
+    
+    R -->|否| S[记录错误行为]
+    R -->|是| T[触发奖励机制]
+    
+    T --> U[记录成功行为]
+    S --> U
+    U --> V[数据上传云端]
+    V --> F
+    
+    M --> W[等待人类离开]
+    W --> X{人类已离开?}
+    X -->|否| W
+    X -->|是| F
+    
+    Q --> F
 ```
 
 ## 云端服务架构
 
 ### 微服务架构
 
-#### 1. 用户管理服务
-- **用户认证**：JWT令牌，OAuth2.0集成
-- **权限管理**：RBAC角色权限控制
-- **账户信息**：用户档案、宠物信息管理
-
-#### 2. 设备管理服务
-- **设备注册**：设备绑定、激活管理
-- **状态监控**：实时状态、健康检查
-- **远程控制**：命令下发、响应处理
-
-#### 3. 数据分析服务
+#### 1. AI模型管理服务
 ```python
-# 行为分析算法示例
-class BehaviorAnalyzer:
+class ModelManagementService:
     def __init__(self):
-        self.model = load_trained_model()
+        self.model_registry = ModelRegistry()
+        self.version_control = ModelVersionControl()
+        
+    async def train_model(self, training_data):
+        """训练新的AI模型"""
+        # 数据预处理
+        processed_data = self.preprocess_data(training_data)
+        
+        # 模型训练
+        model = await self.train_yolo_model(processed_data)
+        
+        # 模型验证
+        metrics = self.validate_model(model, validation_data)
+        
+        # 模型注册
+        model_id = self.model_registry.register(model, metrics)
+        
+        return model_id
     
-    def analyze_behavior(self, sensor_data):
+    async def deploy_model(self, model_id, target_devices):
+        """部署模型到设备"""
+        model = self.model_registry.get_model(model_id)
+        
+        # 模型优化
+        optimized_model = self.optimize_for_edge(model)
+        
+        # 分发到设备
+        for device_id in target_devices:
+            await self.push_model_to_device(device_id, optimized_model)
+    
+    def optimize_for_edge(self, model):
+        """边缘设备模型优化"""
+        # 量化压缩
+        quantized_model = self.quantize_model(model, precision='int8')
+        
+        # 网络剪枝
+        pruned_model = self.prune_model(quantized_model, sparsity=0.3)
+        
+        # 算子融合
+        fused_model = self.fuse_operations(pruned_model)
+        
+        return fused_model
+```
+
+#### 2. 行为分析服务
+```python
+class BehaviorAnalysisService:
+    def __init__(self):
+        self.pattern_analyzer = PatternAnalyzer()
+        self.progress_tracker = ProgressTracker()
+    
+    async def analyze_behavior_patterns(self, pet_id, time_range):
         """分析宠物行为模式"""
-        features = self.extract_features(sensor_data)
-        prediction = self.model.predict(features)
-        return {
-            'behavior_type': prediction.label,
-            'confidence': prediction.probability,
-            'timestamp': sensor_data.timestamp
-        }
-    
-    def generate_insights(self, historical_data):
-        """生成行为洞察报告"""
-        patterns = self.find_patterns(historical_data)
-        recommendations = self.generate_recommendations(patterns)
+        # 获取行为数据
+        behavior_data = await self.get_behavior_data(pet_id, time_range)
+        
+        # 时间序列分析
+        patterns = self.pattern_analyzer.find_patterns(behavior_data)
+        
+        # 成功率趋势分析
+        success_trend = self.analyze_success_trend(behavior_data)
+        
+        # 异常检测
+        anomalies = self.detect_anomalies(behavior_data)
+        
         return {
             'patterns': patterns,
-            'recommendations': recommendations,
-            'training_progress': self.calculate_progress(historical_data)
+            'success_trend': success_trend,
+            'anomalies': anomalies,
+            'recommendations': self.generate_recommendations(patterns)
+        }
+    
+    def generate_recommendations(self, patterns):
+        """基于行为模式生成训练建议"""
+        recommendations = []
+        
+        if patterns['success_rate'] < 0.7:
+            recommendations.append({
+                'type': 'training_intensity',
+                'message': '建议增加训练频率，提高成功率'
+            })
+        
+        if patterns['peak_hours']:
+            recommendations.append({
+                'type': 'optimal_time',
+                'message': f'最佳训练时间：{patterns["peak_hours"]}'
+            })
+        
+        return recommendations
+```
+
+#### 3. 设备管理服务
+```python
+class DeviceManagementService:
+    def __init__(self):
+        self.device_registry = DeviceRegistry()
+        self.telemetry_processor = TelemetryProcessor()
+    
+    async def process_device_telemetry(self, device_id, telemetry_data):
+        """处理设备遥测数据"""
+        # 数据验证
+        validated_data = self.validate_telemetry(telemetry_data)
+        
+        # 设备状态更新
+        await self.update_device_status(device_id, validated_data)
+        
+        # 异常检测
+        anomalies = self.detect_device_anomalies(validated_data)
+        
+        if anomalies:
+            await self.send_maintenance_alert(device_id, anomalies)
+        
+        # 性能优化建议
+        optimization_tips = self.analyze_performance(validated_data)
+        
+        return {
+            'status': 'processed',
+            'anomalies': anomalies,
+            'optimization_tips': optimization_tips
         }
 ```
 
-#### 4. 通知服务
-- **实时推送**：WebSocket长连接，消息推送
-- **邮件通知**：SMTP服务，邮件模板管理
-- **短信通知**：SMS网关集成，紧急通知
+### 数据库设计增强
 
-#### 5. AI训练服务
-- **模型训练**：分布式训练，GPU集群
-- **模型优化**：超参数调优，模型压缩
-- **模型部署**：版本管理，灰度发布
-
-### 数据库设计
-
-#### 主要数据表结构
-
+#### AI训练数据表
 ```sql
--- 用户表
-CREATE TABLE users (
+-- AI训练数据集表
+CREATE TABLE ai_training_datasets (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 宠物信息表
-CREATE TABLE pets (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    user_id BIGINT NOT NULL,
-    name VARCHAR(50) NOT NULL,
-    breed VARCHAR(50),
-    age INT,
-    weight FLOAT,
+    dataset_name VARCHAR(100) NOT NULL,
+    version VARCHAR(20) NOT NULL,
+    data_type ENUM('detection', 'behavior', 'fusion') NOT NULL,
+    total_samples INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id)
+    metadata JSON
 );
 
--- 设备表
-CREATE TABLE devices (
+-- 模型版本管理表
+CREATE TABLE ai_models (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    device_id VARCHAR(100) UNIQUE NOT NULL,
-    user_id BIGINT NOT NULL,
-    pet_id BIGINT,
-    status ENUM('online', 'offline', 'maintenance'),
-    firmware_version VARCHAR(20),
-    last_seen TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (pet_id) REFERENCES pets(id)
+    model_name VARCHAR(100) NOT NULL,
+    version VARCHAR(20) NOT NULL,
+    model_type ENUM('detection', 'behavior', 'fusion') NOT NULL,
+    accuracy FLOAT,
+    model_size_mb FLOAT,
+    inference_time_ms INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    model_data LONGBLOB
 );
 
--- 行为记录表
-CREATE TABLE behavior_records (
+-- 设备模型部署记录
+CREATE TABLE device_model_deployments (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     device_id VARCHAR(100) NOT NULL,
-    pet_id BIGINT NOT NULL,
-    behavior_type ENUM('correct', 'incorrect', 'unknown'),
-    confidence FLOAT,
-    sensor_data JSON,
+    model_id BIGINT NOT NULL,
+    deployment_status ENUM('pending', 'deployed', 'failed') DEFAULT 'pending',
+    deployed_at TIMESTAMP NULL,
+    performance_metrics JSON,
+    FOREIGN KEY (model_id) REFERENCES ai_models(id)
+);
+
+-- 视觉检测原始数据表
+CREATE TABLE vision_detections (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    device_id VARCHAR(100) NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (pet_id) REFERENCES pets(id)
+    frame_id VARCHAR(50),
+    detection_results JSON,  -- 检测结果：目标框、置信度等
+    image_metadata JSON,     -- 图像元数据：分辨率、光照等
+    processed BOOLEAN DEFAULT FALSE
 );
 ```
 
 ## 移动端应用架构
 
-### 技术栈
-- **跨平台框架**：React Native
-- **状态管理**：Redux + Redux Toolkit
-- **网络请求**：Axios + Interceptors
-- **本地存储**：AsyncStorage + SQLite
-- **实时通信**：WebSocket + Socket.io
+### AI相关功能模块
 
-### 应用模块
-
-#### 1. 认证模块
+#### 1. 实时监控模块
 ```javascript
-// 用户认证状态管理
-const authSlice = createSlice({
-  name: 'auth',
+// 实时视频流组件
+const LiveMonitorComponent = () => {
+  const [detectionResults, setDetectionResults] = useState([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  
+  useEffect(() => {
+    // WebSocket连接接收实时检测结果
+    const ws = new WebSocket(`${WS_BASE_URL}/device/${deviceId}/live`);
+    
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'detection_result') {
+        setDetectionResults(data.detections);
+        setIsAnalyzing(data.analyzing);
+      }
+    };
+    
+    return () => ws.close();
+  }, [deviceId]);
+  
+  return (
+    <View style={styles.container}>
+      <VideoPlayer source={`${VIDEO_BASE_URL}/device/${deviceId}/stream`} />
+      <DetectionOverlay detections={detectionResults} />
+      <AnalysisIndicator isAnalyzing={isAnalyzing} />
+    </View>
+  );
+};
+```
+
+#### 2. AI训练数据管理
+```javascript
+// AI训练数据收集
+const TrainingDataManager = {
+  async collectPositiveSample(deviceId, timestamp) {
+    const sample = {
+      device_id: deviceId,
+      timestamp: timestamp,
+      label: 'positive',
+      user_confirmed: true
+    };
+    
+    return await api.post('/training-data/samples', sample);
+  },
+  
+  async collectNegativeSample(deviceId, timestamp) {
+    const sample = {
+      device_id: deviceId,
+      timestamp: timestamp,
+      label: 'negative',
+      user_confirmed: true
+    };
+    
+    return await api.post('/training-data/samples', sample);
+  },
+  
+  async submitFeedback(detectionId, isCorrect, actualBehavior) {
+    const feedback = {
+      detection_id: detectionId,
+      is_correct: isCorrect,
+      actual_behavior: actualBehavior,
+      timestamp: new Date().toISOString()
+    };
+    
+    return await api.post('/ai/feedback', feedback);
+  }
+};
+```
+
+### 隐私保护功能
+
+#### 1. 本地处理模式
+```javascript
+// 隐私设置管理
+const PrivacySettingsSlice = createSlice({
+  name: 'privacy',
   initialState: {
-    user: null,
-    token: null,
-    isAuthenticated: false,
-    loading: false
+    localProcessingOnly: true,
+    humanDetectionEnabled: true,
+    privacyZones: [],
+    workingHours: { start: '09:00', end: '18:00' },
+    emergencyStop: false
   },
   reducers: {
-    loginStart: (state) => {
-      state.loading = true;
+    toggleLocalProcessing: (state, action) => {
+      state.localProcessingOnly = action.payload;
     },
-    loginSuccess: (state, action) => {
-      state.user = action.payload.user;
-      state.token = action.payload.token;
-      state.isAuthenticated = true;
-      state.loading = false;
+    setPrivacyZones: (state, action) => {
+      state.privacyZones = action.payload;
     },
-    logout: (state) => {
-      state.user = null;
-      state.token = null;
-      state.isAuthenticated = false;
+    enableEmergencyStop: (state) => {
+      state.emergencyStop = true;
+      // 立即停止所有监控功能
     }
   }
 });
 ```
 
-#### 2. 设备控制模块
-- **设备发现**：蓝牙扫描、WiFi配网
-- **实时监控**：设备状态、传感器数据展示
-- **远程控制**：参数设置、手动控制
-- **固件更新**：OTA更新进度显示
-
-#### 3. 数据可视化模块
-- **图表库**：Victory Native图表组件
-- **实时数据**：WebSocket数据流
-- **历史数据**：分页加载、筛选查询
-- **报告生成**：PDF导出、分享功能
-
-#### 4. 训练管理模块
-- **训练计划**：个性化训练方案
-- **进度跟踪**：训练效果评估
-- **行为分析**：行为模式识别
-- **奖励设置**：奖励策略配置
-
-### API接口设计
-
-#### RESTful API规范
-
+#### 2. 人体检测过滤
 ```javascript
-// 设备相关API
-GET    /api/v1/devices          // 获取设备列表
-POST   /api/v1/devices          // 添加新设备
-GET    /api/v1/devices/:id      // 获取设备详情
-PUT    /api/v1/devices/:id      // 更新设备信息
-DELETE /api/v1/devices/:id      // 删除设备
-
-// 行为数据API
-GET    /api/v1/behaviors                    // 获取行为记录
-POST   /api/v1/behaviors                    // 上传行为数据
-GET    /api/v1/behaviors/statistics         // 获取统计数据
-GET    /api/v1/behaviors/analysis/:pet_id   // 获取行为分析
-
-// 实时通信WebSocket
-ws://api.example.com/ws/device/:device_id   // 设备实时数据
-ws://api.example.com/ws/notifications       // 推送通知
+// 人体检测状态管理
+const HumanDetectionComponent = () => {
+  const [humanPresent, setHumanPresent] = useState(false);
+  const [monitoringPaused, setMonitoringPaused] = useState(false);
+  
+  useEffect(() => {
+    const subscription = DeviceEventEmitter.addListener(
+      'human_detection_update',
+      (data) => {
+        setHumanPresent(data.human_detected);
+        setMonitoringPaused(data.monitoring_paused);
+        
+        if (data.human_detected) {
+          // 显示隐私保护提示
+          showPrivacyNotification();
+        }
+      }
+    );
+    
+    return () => subscription.remove();
+  }, []);
+  
+  return (
+    <View style={styles.privacyIndicator}>
+      {humanPresent && (
+        <Text style={styles.privacyText}>
+          🔒 检测到人员活动，监控已暂停以保护隐私
+        </Text>
+      )}
+    </View>
+  );
+};
 ```
 
-## 安全架构
+## 安全与隐私架构
 
 ### 数据安全
-- **传输加密**：TLS 1.3端到端加密
-- **存储加密**：AES-256数据库加密
-- **访问控制**：API网关、限流控制
-- **审计日志**：操作记录、安全事件追踪
+- **端到端加密**：所有敏感数据采用AES-256加密
+- **本地AI处理**：视觉数据仅在设备本地处理，不上传云端
+- **数据脱敏**：上传统计数据时去除个人标识信息
+- **访问控制**：基于角色的访问控制(RBAC)
 
-### 设备安全
-- **设备认证**：PKI证书认证
-- **固件签名**：代码签名验证
-- **安全启动**：Secure Boot验证
-- **密钥管理**：硬件安全模块(HSM)
+### 隐私保护技术
+```c
+// 隐私保护算法
+typedef struct {
+    bool enable_human_filter;
+    region_t privacy_zones[MAX_PRIVACY_ZONES];
+    time_range_t active_hours;
+    bool emergency_stop;
+} privacy_config_t;
 
-### 隐私保护
-- **数据匿名化**：个人信息脱敏
-- **权限最小化**：最小权限原则
-- **合规性**：GDPR、CCPA合规
-- **用户控制**：数据删除、导出权利
+// 人体检测隐私保护
+bool privacy_check_human_presence(detection_result_t* result) {
+    for (int i = 0; i < result->object_count; i++) {
+        if (result->types[i] == OBJECT_TYPE_HUMAN) {
+            // 检测到人类，触发隐私保护
+            privacy_pause_monitoring();
+            return true;
+        }
+    }
+    return false;
+}
 
-## 部署架构
-
-### 容器化部署
-```yaml
-# docker-compose.yml
-version: '3.8'
-services:
-  api-gateway:
-    image: poopal/api-gateway:latest
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      - RATE_LIMIT=1000
-      - SSL_CERT_PATH=/certs
-  
-  user-service:
-    image: poopal/user-service:latest
-    environment:
-      - DB_HOST=mysql
-      - REDIS_HOST=redis
-    depends_on:
-      - mysql
-      - redis
-  
-  mysql:
-    image: mysql:8.0
-    environment:
-      - MYSQL_ROOT_PASSWORD=secure_password
-      - MYSQL_DATABASE=poopal
-    volumes:
-      - mysql_data:/var/lib/mysql
-  
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
+// 隐私区域检查
+bool is_in_privacy_zone(detection_box_t* box, privacy_config_t* config) {
+    for (int i = 0; i < config->num_privacy_zones; i++) {
+        if (box_intersects_region(box, &config->privacy_zones[i])) {
+            return true;
+        }
+    }
+    return false;
+}
 ```
 
-### 监控和运维
-- **日志管理**：ELK Stack (Elasticsearch, Logstash, Kibana)
-- **性能监控**：Prometheus + Grafana
-- **错误追踪**：Sentry错误监控
-- **健康检查**：Kubernetes健康探针
+## 性能监控与优化
 
-## 开发规范
+### 实时性能监控
+```c
+// 性能指标收集
+typedef struct {
+    // AI推理性能
+    uint32_t detection_latency_ms;
+    uint32_t behavior_analysis_latency_ms;
+    float detection_accuracy;
+    
+    // 系统资源使用
+    float cpu_usage_percent;
+    size_t memory_usage_bytes;
+    float gpu_usage_percent;
+    
+    // 网络性能
+    uint32_t network_latency_ms;
+    uint32_t data_upload_rate_kbps;
+    
+    // 设备状态
+    uint8_t battery_level;
+    float device_temperature_c;
+} performance_metrics_t;
 
-### 代码规范
-- **C/C++**：Google C++ Style Guide
-- **Python**：PEP 8编码规范
-- **JavaScript**：ESLint + Prettier
-- **文档**：Doxygen自动化文档
+// 性能优化决策
+void adaptive_performance_control(performance_metrics_t* metrics) {
+    // 基于性能指标动态调整
+    if (metrics->detection_latency_ms > 100) {
+        // 降低检测频率或模型精度
+        adjust_detection_frequency(0.8f);
+    }
+    
+    if (metrics->cpu_usage_percent > 90.0f) {
+        // 启用省电模式
+        enable_power_saving_mode();
+    }
+    
+    if (metrics->device_temperature_c > 60.0f) {
+        // 降低处理负载，防止过热
+        reduce_processing_load();
+    }
+}
+```
 
-### 测试策略
-- **单元测试**：覆盖率>90%
-- **集成测试**：API接口测试
-- **硬件测试**：HIL(Hardware-in-the-Loop)
-- **性能测试**：负载测试、压力测试
+### 自适应算法优化
+- **动态模型切换**：根据场景自动选择最优模型
+- **自适应帧率调整**：根据活动量调整处理帧率
+- **智能缓存策略**：预测性缓存常用模型和数据
+- **负载均衡**：在多核处理器间智能分配计算任务
 
-### CI/CD流程
-1. **代码提交** → Git Hook检查
-2. **自动构建** → Docker镜像构建
-3. **自动测试** → 单元测试、集成测试
-4. **质量检查** → SonarQube代码质量分析
-5. **部署** → 自动部署到测试环境
-6. **发布** → 手动确认后生产环境部署
+## 开发与测试
+
+### AI模型测试框架
+```python
+class ModelTestFramework:
+    def __init__(self):
+        self.test_datasets = TestDatasetManager()
+        self.metrics_calculator = MetricsCalculator()
+    
+    def test_detection_model(self, model, test_dataset):
+        """测试目标检测模型"""
+        results = []
+        
+        for sample in test_dataset:
+            prediction = model.detect(sample.image)
+            ground_truth = sample.annotations
+            
+            # 计算检测指标
+            metrics = self.calculate_detection_metrics(prediction, ground_truth)
+            results.append(metrics)
+        
+        return self.aggregate_results(results)
+    
+    def test_behavior_model(self, model, test_sequences):
+        """测试行为识别模型"""
+        results = []
+        
+        for sequence in test_sequences:
+            prediction = model.analyze_behavior(sequence.frames)
+            ground_truth = sequence.behavior_label
+            
+            # 计算分类指标
+            metrics = self.calculate_classification_metrics(prediction, ground_truth)
+            results.append(metrics)
+        
+        return self.aggregate_results(results)
+```
+
+### 集成测试策略
+- **硬件在环测试(HIL)**：真实硬件环境测试
+- **视觉算法测试**：大规模数据集验证
+- **性能压力测试**：极限场景下的系统稳定性
+- **用户体验测试**：真实用户环境测试
+
+这个更新后的软件架构充分体现了基于摄像头的AI视觉系统，去除了热成像相关内容，并强化了隐私保护和人体检测过滤功能。
